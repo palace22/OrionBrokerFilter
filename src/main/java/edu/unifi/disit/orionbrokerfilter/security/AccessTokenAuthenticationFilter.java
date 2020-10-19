@@ -116,20 +116,25 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 	String refreshToken = null;
 
 	@Override
-	public void doFilter(ServletRequest request, ServletResponse response, FilterChain filterChain) throws JsonProcessingException, IOException, ServletException {
+	public void doFilter(ServletRequest request, ServletResponse response, FilterChain filterChain)
+			throws JsonProcessingException, IOException, ServletException {
 
 		final HttpServletRequest req = (HttpServletRequest) request;
 		MultiReadHttpServletRequest multiReadRequest = new MultiReadHttpServletRequest((HttpServletRequest) request);
 
 		// retrieve eventually certicate
 		String pksha1 = null;
-		X509Certificate[] certs = (X509Certificate[]) multiReadRequest.getAttribute("javax.servlet.request.X509Certificate");
+		X509Certificate[] certs = (X509Certificate[]) multiReadRequest
+				.getAttribute("javax.servlet.request.X509Certificate");
 		if ((certs != null) && (certs.length > 0)) {
 			String pk = new String(Base64.encode(certs[0].getPublicKey().getEncoded()), StandardCharsets.UTF_8);
 			logger.debug("certificate arrived, public key is:" + pk);
 			pksha1 = DigestUtils.sha1Hex(pk.getBytes());
 			logger.debug("sha1 public key is: {}", pksha1);
 		}
+
+		String requestURL = req.getRequestURL().toString();
+		String requestMethod = req.getMethod();
 
 		// retrieve k1 k2 credentials
 		String k1 = multiReadRequest.getParameter("k1");
@@ -140,7 +145,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		String elementId = req.getParameter("elementid");
 
 		// eventually enrich with Multi-tenancy info
-		if (req.getHeader("Fiware-Service") != null || req.getHeader("Fiware-ServicePath") != null) {// check always to be made
+		if (req.getHeader("Fiware-Service") != null || req.getHeader("Fiware-ServicePath") != null) {// check always to
+																										// be made
 			if (req.getHeader("Fiware-ServicePath") != null)
 				elementId = req.getHeader("Fiware-ServicePath") + "." + elementId;
 			else
@@ -153,7 +159,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 			logger.debug("elementid became:" + elementId);
 		}
 
-		// retrieve eventually accessToken. The enforcement/management of this access token is still not used in the Orion Filter
+		// retrieve eventually accessToken. The enforcement/management of this access
+		// token is still not used in the Orion Filter
 		// the access is granted via k1/k2/certificate
 		String accessToken = null;
 		if ((req.getHeader("Authorization") != null) && (req.getHeader("Authorization").length() > 8)) {
@@ -170,13 +177,32 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 				logger.debug("K2 {}", k2);
 
 			try {
+				String sensorName = "";
+				logger.debug("REQUEST URL: " + req.getRequestURL().toString());
+				if (requestURL.indexOf("/v1/") >= 0) {
+					logger.debug("Searching sensor name in API v1 body.");
+					sensorName = getSensorNameAPIv1(multiReadRequest, isWriteQuery(queryType),
+							req.getParameter("elementid"));// can return null, the passed elementid is the original one
+				} else {
+					logger.debug("Searching sensor name in API v2 body.");
+					sensorName = getSensorNameAPIv2(multiReadRequest, requestMethod, req.getParameter("elementid"));// can
+																													// return
+																													// null,
+																													// the
+																													// passed
+																													// elementid
+																													// is
+																													// the
+																													// original
+																													// one
+				}
 
-				String sensorName = getSensorName(multiReadRequest, isWriteQuery(queryType), req.getParameter("elementid"));// can return null, the passed elementid is the original one
 				if (sensorName != null)
 					logger.debug("sensor's name {}", sensorName);
 
 				// if (!queryType.contains("unsubscribeContext"))
-				checkAuthorization(prefixelementID + ":" + elementId, k1, k2, queryType, sensorName, pksha1, request.getLocale());
+				checkAuthorization(prefixelementID + ":" + elementId, k1, k2, queryType, sensorName, pksha1,
+						request.getLocale());
 
 				logger.debug("Credentials ARE VALID");
 
@@ -193,7 +219,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		} else {
 			logger.error("Credentials ARE NOT PRESENT");
 
-			writeResponseError(response, messages.getMessage("login.ko.credentialsnotpresent", null, request.getLocale()));
+			writeResponseError(response,
+					messages.getMessage("login.ko.credentialsnotpresent", null, request.getLocale()));
 
 			return;
 
@@ -202,7 +229,46 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		filterChain.doFilter(multiReadRequest, response);
 	}
 
-	private String getSensorName(HttpServletRequest multiReadRequest, boolean isWriteQuery, String elementId) throws IOException, NoSuchMessageException, CredentialsNotValidException {
+	private String getSensorNameAPIv2(HttpServletRequest multiReadRequest, String requestMethod, String elementId)
+			throws IOException, NoSuchMessageException, CredentialsNotValidException {
+		String attribute = null;
+		int attributeStart;
+		int attributeEnd;
+		String entityBody = IOUtils.toString(multiReadRequest.getInputStream(), StandardCharsets.UTF_8.toString())
+				.replace(" ", "");
+
+		try {
+			switch (requestMethod) {
+			case "POST":// Subscription
+				int notificationIndex = entityBody.indexOf("notification");
+				int attrsIndex = entityBody.indexOf("attrs", notificationIndex);
+				attributeStart = entityBody.indexOf("[\"", attrsIndex) + 2;
+				attributeEnd = entityBody.indexOf("\"", attributeStart);
+				attribute = entityBody.substring(attributeStart, attributeEnd);
+				if (entityBody.indexOf(elementId) == -1) {
+					logger.warn(messages.getMessage("login.ko.elementidnotvalid", null, multiReadRequest.getLocale())
+							+ " entityBody is {}", entityBody);
+					throw new CredentialsNotValidException(
+							messages.getMessage("login.ko.elementidnotvalid", null, multiReadRequest.getLocale()));
+				}
+				return attribute;
+			case "PATCH":// Update
+				attributeStart = entityBody.indexOf("{\"") + 2;
+				attributeEnd = entityBody.indexOf("\":");
+				attribute = entityBody.substring(attributeStart, attributeEnd).trim();
+				return attribute;
+			case "DELETE":// Unsubscription
+				return null;
+			}
+		} catch (Exception err) {
+			logger.warn("Attribute name not detected!");
+			return null;
+		}
+		return null;
+	}
+
+	private String getSensorNameAPIv1(HttpServletRequest multiReadRequest, boolean isWriteQuery, String elementId)
+			throws IOException, NoSuchMessageException, CredentialsNotValidException {
 
 		String entityBody = IOUtils.toString(multiReadRequest.getInputStream(), StandardCharsets.UTF_8.toString());
 
@@ -211,8 +277,11 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		// retrieve "attributes index
 		int startIndex = entityBody.indexOf("attributes");
 		if (startIndex == -1) {
-			logger.warn(messages.getMessage("login.ko.sensornamenotpresent", null, multiReadRequest.getLocale()) + " entityBody is {}", entityBody);
-			// throw new CredentialsNotValidException(messages.getMessage("login.ko.sensornamenotpresent", null, multiReadRequest.getLocale()));
+			logger.warn(messages.getMessage("login.ko.sensornamenotpresent", null, multiReadRequest.getLocale())
+					+ " entityBody is {}", entityBody);
+			// throw new
+			// CredentialsNotValidException(messages.getMessage("login.ko.sensornamenotpresent",
+			// null, multiReadRequest.getLocale()));
 
 			return null;
 		}
@@ -228,15 +297,19 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		}
 
 		if (startIndex > entityBody.length()) {
-			logger.warn(messages.getMessage("login.ko.sensornamenotvalid", null, multiReadRequest.getLocale()) + "(1) entityBody is {}", entityBody);
-			// throw new CredentialsNotValidException(messages.getMessage("login.ko.sensornamenotvalid", null, multiReadRequest.getLocale()) + "(1)");
+			logger.warn(messages.getMessage("login.ko.sensornamenotvalid", null, multiReadRequest.getLocale())
+					+ "(1) entityBody is {}", entityBody);
+			// throw new
+			// CredentialsNotValidException(messages.getMessage("login.ko.sensornamenotvalid",
+			// null, multiReadRequest.getLocale()) + "(1)");
 			return null;
 		}
 
 		int endIndex = entityBody.indexOf("\"", startIndex);
 		if (endIndex == -1) {
 			// if the attribute field is empty, the sensor name is empty
-			logger.debug("detecting empty attributes, sensor name is empty-string (the delegation has to be formatted correctly)");
+			logger.debug(
+					"detecting empty attributes, sensor name is empty-string (the delegation has to be formatted correctly)");
 			return null;
 		}
 
@@ -245,8 +318,10 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 
 			// ensure the elementid passed as parameter is included in the entityBody
 			if (entityBody.indexOf(elementId) == -1) {
-				logger.warn(messages.getMessage("login.ko.elementidnotvalid", null, multiReadRequest.getLocale()) + " entityBody is {}", entityBody);
-				throw new CredentialsNotValidException(messages.getMessage("login.ko.elementidnotvalid", null, multiReadRequest.getLocale()));
+				logger.warn(messages.getMessage("login.ko.elementidnotvalid", null, multiReadRequest.getLocale())
+						+ " entityBody is {}", entityBody);
+				throw new CredentialsNotValidException(
+						messages.getMessage("login.ko.elementidnotvalid", null, multiReadRequest.getLocale()));
 			}
 
 			return entityBody.substring(startIndex, endIndex);
@@ -267,11 +342,13 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 	private void authUser() {
 		List<GrantedAuthority> authorities = new ArrayList<GrantedAuthority>();
 		authorities.add(new SimpleGrantedAuthority("ROLE_USER")); // here we just set the basic role to USER
-		UsernamePasswordAuthenticationToken usernamePasswordAuthenticationToken = new UsernamePasswordAuthenticationToken("username", "userpwd", authorities);// here we just set a fake password
+		UsernamePasswordAuthenticationToken usernamePasswordAuthenticationToken = new UsernamePasswordAuthenticationToken(
+				"username", "userpwd", authorities);// here we just set a fake password
 		SecurityContextHolder.getContext().setAuthentication(usernamePasswordAuthenticationToken);
 	}
 
-	private void checkAuthorization(String elementId, String k1, String k2, String queryType, String sensorName, String pksha1, Locale lang) throws CredentialsNotValidException, UnsupportedEncodingException {
+	private void checkAuthorization(String elementId, String k1, String k2, String queryType, String sensorName,
+			String pksha1, Locale lang) throws CredentialsNotValidException, UnsupportedEncodingException {
 
 		CachedCredentials cc = getCachedCredentials(elementId, sensorName, lang);
 
@@ -283,7 +360,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 					return;
 				} else {
 					logger.debug("The owner credential are NOT valid");
-					throw new CredentialsNotValidException(messages.getMessage("login.ko.credentialsnotvalid", null, lang));
+					throw new CredentialsNotValidException(
+							messages.getMessage("login.ko.credentialsnotvalid", null, lang));
 				}
 			} else {
 				logger.debug("The operation is READ on public");
@@ -297,7 +375,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 					return;
 				} else {
 					logger.debug("The owner credentials are NOT valid");
-					throw new CredentialsNotValidException(messages.getMessage("login.ko.credentialsnotvalid", null, lang));
+					throw new CredentialsNotValidException(
+							messages.getMessage("login.ko.credentialsnotvalid", null, lang));
 				}
 			} else {
 				logger.debug("The operation is READ on private");
@@ -305,16 +384,21 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 					logger.debug("The owner credentials are valid");
 					return;
 				} else {
-					// TODO if the elementID is private, the invoked query is a READ, and it's not the owner, first we need to check if the sensorID is PUBLIC (from cached and via packet inspection) and if not we need to validate the
+					// TODO if the elementID is private, the invoked query is a READ, and it's not
+					// the owner, first we need to check if the sensorID is PUBLIC (from cached and
+					// via packet inspection) and if not we need to validate the
 					// delegation as below
 					logger.debug("The owner credentials are not valid, check if there are any delegation");
 					for (Credentials c : cc.getDelegatedCredentials()) {
-						if (cc.getOwnerCredentials().getPksha1() == null) {// if the elementID is not protected with certificate, use k1, k2 enforcement
+						if (cc.getOwnerCredentials().getPksha1() == null) {// if the elementID is not protected with
+																			// certificate, use k1, k2 enforcement
 							if (c.isValid(k1, k2)) {
 								logger.debug("One of the delegated credentials are valid, certificate not involved");
 								return;
 							}
-						} else {// if the elementID is protected with certificate: (1) check if there is a pksha1 and (2) check the username delegated is the same of the username included in the certicate
+						} else {// if the elementID is protected with certificate: (1) check if there is a
+								// pksha1 and (2) check the username delegated is the same of the username
+								// included in the certicate
 							if ((pksha1 != null) && (c.isValid(getUsername(pksha1, lang)))) {
 								logger.debug("One of the delegated credentials are valid, certificate involved");
 								return;
@@ -322,7 +406,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 						}
 					}
 					logger.debug("None of the delegated credential are valid");
-					throw new CredentialsNotValidException(messages.getMessage("login.ko.credentialsnotvalid", null, lang));
+					throw new CredentialsNotValidException(
+							messages.getMessage("login.ko.credentialsnotvalid", null, lang));
 				}
 			}
 		}
@@ -346,7 +431,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		return queryType.contains("updateContext");
 	}
 
-	private CachedCredentials getCachedCredentials(String elementId, String sensorName, Locale lang) throws CredentialsNotValidException, UnsupportedEncodingException {
+	private CachedCredentials getCachedCredentials(String elementId, String sensorName, Locale lang)
+			throws CredentialsNotValidException, UnsupportedEncodingException {
 
 		String accessToken = null;
 
@@ -408,19 +494,27 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 	}
 
 	// default value:private (old scenario from iotdirectory)
-	// if there is a string that contains "public", in the ow field, it is considered public
+	// if there is a string that contains "public", in the ow field, it is
+	// considered public
 	private boolean isPublicFromKB(String elementUrl, Locale lang) throws CredentialsNotValidException {
 
-		String queryKB = "select distinct ?ow { " +
-				"OPTIONAL {<" + elementUrl + "> km4c:ownership ?ow.}" + "}";// assume that any elementId here are on this orion broker
+		String queryKB = "select distinct ?ow { " + "OPTIONAL {<" + elementUrl + "> km4c:ownership ?ow.}" + "}";// assume
+																												// that
+																												// any
+																												// elementId
+																												// here
+																												// are
+																												// on
+																												// this
+																												// orion
+																												// broker
 
 		MultiValueMap<String, String> params = new LinkedMultiValueMap<String, String>();
 		params.add("format", "json");
 		params.add("timeout", "0");
 		params.add("query", queryKB);
 
-		UriComponents uriComponents = UriComponentsBuilder.fromHttpUrl(servicemapkb_endpoint)
-				.queryParams(params)
+		UriComponents uriComponents = UriComponentsBuilder.fromHttpUrl(servicemapkb_endpoint).queryParams(params)
 				.build();
 		logger.debug("query isPublicFromKB {}", uriComponents.toUri());
 
@@ -429,7 +523,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		HttpEntity<String> entity = new HttpEntity<>("parameters", headers);
 
 		try {
-			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.GET, entity, String.class);
+			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.GET, entity,
+					String.class);
 			logger.debug("Response from isPublicFromKB {}", response);
 
 			ObjectMapper objectMapper = new ObjectMapper();
@@ -501,11 +596,12 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		// RestTemplate restTemplate = new RestTemplate();
 		HttpHeaders headers = new HttpHeaders();
 		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-		HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<MultiValueMap<String, String>>(params, headers);
-
+		HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<MultiValueMap<String, String>>(params,
+				headers);
 
 		try {
-			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.POST, entity, String.class);
+			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.POST, entity,
+					String.class);
 			logger.debug("Response from getAccessToken {}", response);
 
 			ObjectMapper objectMapper = new ObjectMapper();
@@ -552,11 +648,13 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		// RestTemplate restTemplate = new RestTemplate();
 		HttpHeaders headers = new HttpHeaders();
 		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-		HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<MultiValueMap<String, String>>(params, headers);
+		HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<MultiValueMap<String, String>>(params,
+				headers);
 
 		try {
 
-			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.POST, entity, String.class);
+			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.POST, entity,
+					String.class);
 			logger.debug("Response from getRefreshToken {}", response);
 
 			ObjectMapper objectMapper = new ObjectMapper();
@@ -576,7 +674,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		}
 	}
 
-	private Ownership getOwnership(String accessToken, String elementId, Locale lang) throws CredentialsNotValidException {
+	private Ownership getOwnership(String accessToken, String elementId, Locale lang)
+			throws CredentialsNotValidException {
 
 		Ownership toreturn = null;
 
@@ -585,9 +684,7 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		params.add("accessToken", accessToken);
 		params.add("elementId", elementId);
 
-		UriComponents uriComponents = UriComponentsBuilder.fromHttpUrl(ownership_endpoint)
-				.queryParams(params)
-				.build();
+		UriComponents uriComponents = UriComponentsBuilder.fromHttpUrl(ownership_endpoint).queryParams(params).build();
 		logger.debug("query getOwnerCredentials {}", uriComponents.toUri());
 
 		// RestTemplate restTemplate = new RestTemplate();
@@ -595,7 +692,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		HttpEntity<String> entity = new HttpEntity<>("parameters", headers);
 
 		try {
-			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.GET, entity, String.class);
+			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.GET, entity,
+					String.class);
 			logger.debug("Response from  getOwnerCredentials {}", response);
 
 			ObjectMapper objectMapper = new ObjectMapper();
@@ -634,7 +732,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 			// k1, k2 - has to be present
 			JsonNode k1Node = edNode.path("k1");
 			JsonNode k2Node = edNode.path("k2");
-			if ((k1Node == null) || (k1Node.isNull()) || ((k2Node == null) || (k2Node.isNull())) || (k1Node.isMissingNode()) || (k2Node.isMissingNode())) {
+			if ((k1Node == null) || (k1Node.isNull()) || ((k2Node == null) || (k2Node.isNull()))
+					|| (k1Node.isMissingNode()) || (k2Node.isMissingNode())) {
 				logger.error("The retreived data does not contains k1, k2");
 				throw new CredentialsNotValidException(messages.getMessage("login.ko.configurationerror", null, lang));
 			}
@@ -646,7 +745,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 				pksha1 = pksha1Node.asText();
 			}
 
-			toreturn = new Ownership(elementUrlNode.asText(), k1Node.asText(), k2Node.asText(), usernameNode.asText(), pksha1, minutesElapsingCache);
+			toreturn = new Ownership(elementUrlNode.asText(), k1Node.asText(), k2Node.asText(), usernameNode.asText(),
+					pksha1, minutesElapsingCache);
 		} catch (HttpClientErrorException | IOException e) {
 			logger.error("Trouble in getOwnerCredentials", e);
 			throw new CredentialsNotValidException(messages.getMessage("login.ko.networkproblems", null, lang));
@@ -655,7 +755,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		return toreturn;
 	}
 
-	private String getUsernamePKCredentials(String accessToken, String pksha1, Locale lang) throws CredentialsNotValidException {
+	private String getUsernamePKCredentials(String accessToken, String pksha1, Locale lang)
+			throws CredentialsNotValidException {
 
 		String toreturn = null;
 
@@ -664,9 +765,7 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		params.add("accessToken", accessToken);
 		params.add("pubkeySHA1", pksha1);
 
-		UriComponents uriComponents = UriComponentsBuilder.fromHttpUrl(ownership_endpoint)
-				.queryParams(params)
-				.build();
+		UriComponents uriComponents = UriComponentsBuilder.fromHttpUrl(ownership_endpoint).queryParams(params).build();
 		logger.debug("query getOwnerCredentials {}", uriComponents.toUri());
 
 		// RestTemplate restTemplate = new RestTemplate();
@@ -674,7 +773,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		HttpEntity<String> entity = new HttpEntity<>("parameters", headers);
 
 		try {
-			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.GET, entity, String.class);
+			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.GET, entity,
+					String.class);
 			logger.debug("Response from getOwnerCredentials {}", response);
 
 			ObjectMapper objectMapper = new ObjectMapper();
@@ -705,7 +805,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		return toreturn;
 	}
 
-	private CachedCredentials enrichDelegatedCredentials(CachedCredentials cc, String accessToken, String sensorUri, Locale lang) throws CredentialsNotValidException, UnsupportedEncodingException {
+	private CachedCredentials enrichDelegatedCredentials(CachedCredentials cc, String accessToken, String sensorUri,
+			Locale lang) throws CredentialsNotValidException, UnsupportedEncodingException {
 
 		List<Credentials> toreturn = new ArrayList<Credentials>();
 
@@ -713,8 +814,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		params.add("accessToken", accessToken);
 		params.add("sourceRequest", "orionbrokerfilter");
 
-		UriComponents uriComponents = UriComponentsBuilder.fromHttpUrl(delegation_endpoint + "/" + URLEncoder.encode(sensorUri, StandardCharsets.UTF_8.toString()) + "/delegator")
-				.queryParams(params)
+		UriComponents uriComponents = UriComponentsBuilder.fromHttpUrl(delegation_endpoint + "/"
+				+ URLEncoder.encode(sensorUri, StandardCharsets.UTF_8.toString()) + "/delegator").queryParams(params)
 				.build();
 		logger.debug("query getDelegatedCredentials {}", uriComponents.toUri());
 
@@ -723,7 +824,8 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		HttpEntity<String> entity = new HttpEntity<>("parameters", headers);
 
 		try {
-			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.GET, entity, String.class);
+			ResponseEntity<String> response = restTemplate.exchange(uriComponents.toUri(), HttpMethod.GET, entity,
+					String.class);
 			logger.debug("Response from getDelegatedCredentials {}", response);
 
 			ObjectMapper objectMapper = new ObjectMapper();
@@ -738,7 +840,9 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 					JsonNode udNode = elNode.path("usernameDelegated");
 					if ((udNode == null) || (udNode.isNull()) || (udNode.isMissingNode())) {
 						logger.error("The retrieved data does not contains userDelegated");
-						// throw new CredentialsNotValidException(messages.getMessage("login.ko.configurationerror", null, lang));
+						// throw new
+						// CredentialsNotValidException(messages.getMessage("login.ko.configurationerror",
+						// null, lang));
 						continue;
 					}
 					if (udNode.asText().equals("ANONYMOUS"))
@@ -750,7 +854,9 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 
 					if ((deNode == null) || (deNode.isNull()) || (deNode.isMissingNode())) {
 						logger.debug("The retrieved data does not contains delegationDetails (probably it's PUBLIC)");
-						// throw new CredentialsNotValidException(messages.getMessage("login.ko.configurationerror", null, lang));
+						// throw new
+						// CredentialsNotValidException(messages.getMessage("login.ko.configurationerror",
+						// null, lang));
 						continue;
 					}
 
@@ -762,9 +868,12 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 					JsonNode k1Node = deNodeParsed.path("k1");
 					JsonNode k2Node = deNodeParsed.path("k2");
 
-					if ((k1Node == null) || (k1Node.isNull()) || ((k2Node == null) || (k2Node.isNull())) || (k1Node.isMissingNode()) || (k2Node.isMissingNode())) {
+					if ((k1Node == null) || (k1Node.isNull()) || ((k2Node == null) || (k2Node.isNull()))
+							|| (k1Node.isMissingNode()) || (k2Node.isMissingNode())) {
 						logger.error("The retreived data does not contains k1, k2");
-						// throw new CredentialsNotValidException(messages.getMessage("login.ko.configurationerror", null, lang));
+						// throw new
+						// CredentialsNotValidException(messages.getMessage("login.ko.configurationerror",
+						// null, lang));
 						continue;
 					}
 
