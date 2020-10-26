@@ -181,11 +181,12 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 				logger.debug("REQUEST URL: " + req.getRequestURL().toString());
 				if (requestURL.indexOf("/v1/") >= 0) {
 					logger.debug("Searching sensor name in API v1 body.");
+					logger.debug("REQUEST URL" + req.getRequestURL().toString());
 					sensorName = getSensorNameAPIv1(multiReadRequest, isWriteQuery(queryType),
 							req.getParameter("elementid"));// can return null, the passed elementid is the original one
 				} else {
 					logger.debug("Searching sensor name in API v2 body.");
-					sensorName = getSensorNameAPIv2(multiReadRequest, requestMethod, req.getParameter("elementid"));// can
+					sensorName = getSensorNameAPIv2(multiReadRequest, requestMethod, req);// can
 																													// return
 																													// null,
 																													// the
@@ -229,7 +230,7 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 		filterChain.doFilter(multiReadRequest, response);
 	}
 
-	private String getSensorNameAPIv2(HttpServletRequest multiReadRequest, String requestMethod, String elementId)
+	private String getSensorNameAPIv2(HttpServletRequest multiReadRequest, String requestMethod, HttpServletRequest req)
 			throws IOException, NoSuchMessageException, CredentialsNotValidException {
 		String attribute = null;
 		int attributeStart;
@@ -239,13 +240,19 @@ public class AccessTokenAuthenticationFilter extends GenericFilterBean {
 
 		try {
 			switch (requestMethod) {
+			case "GET":// Query
+				attribute = req.getParameter("attrs");
+				if(attribute.indexOf(',')!=-1) {
+					attribute= attribute.substring(0, attribute.indexOf(','));
+				};
+				return attribute;
 			case "POST":// Subscription
 				int notificationIndex = entityBody.indexOf("notification");
 				int attrsIndex = entityBody.indexOf("attrs", notificationIndex);
 				attributeStart = entityBody.indexOf("[\"", attrsIndex) + 2;
 				attributeEnd = entityBody.indexOf("\"", attributeStart);
 				attribute = entityBody.substring(attributeStart, attributeEnd);
-				if (entityBody.indexOf(elementId) == -1) {
+				if (entityBody.indexOf(req.getParameter("elementid")) == -1) {
 					logger.warn(messages.getMessage("login.ko.elementidnotvalid", null, multiReadRequest.getLocale())
 							+ " entityBody is {}", entityBody);
 					throw new CredentialsNotValidException(
